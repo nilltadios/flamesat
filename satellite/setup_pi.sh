@@ -3,5 +3,5 @@
 echo "🛰️ Initializing FLAMESAT Environment..."
 python3 -m venv env
 source env/bin/activate
-pip install adafruit-circuitpython-mlx90640 matplotlib numpy
+pip install adafruit-circuitpython-mlx90640 matplotlib numpy lgpio
 echo "✅ Environment Ready. Run 'source env/bin/activate' then 'python tx_satellite.py'"

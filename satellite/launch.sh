@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 1. Move to the Mission Control Folder
-cd /home/flamesat/fire_sat
+cd /home/flamesat/flamesat/satellite
 
 # 2. Activate the Python Environment
 source env/bin/activate
