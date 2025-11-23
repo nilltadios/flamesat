@@ -1,0 +1,20 @@
+# --- Python Garbage ---
+__pycache__/
+*.pyc
+env/
+venv/
+
+# --- Logs & Data ---
+logs/
+*.log
+*.pids
+
+# --- Secrets (CRITICAL) ---
+# Ignore Cloudflare credentials if you accidentally drag them in
+*.json
+*.pem
+cert.pem
+flame_tunnel/
+
+# --- System ---
+.DS_Store
