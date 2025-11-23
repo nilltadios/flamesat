@@ -15,6 +15,7 @@ logs/
 *.pem
 cert.pem
 flame_tunnel/
+secrets.json
 
 # --- System ---
 .DS_Store
