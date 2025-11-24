@@ -11,15 +11,28 @@ from flask import Flask, jsonify, render_template_string, request
 
 # --- LOAD SECRETS ---
 SECRETS_FILE = "secrets.json"
+EMAIL_SENDER = None
+EMAIL_RECEIVERS = []
+
 try:
     with open(SECRETS_FILE) as f:
         secrets = json.load(f)
         EMAIL_SENDER = secrets.get("email_sender")
         EMAIL_PASSWORD = secrets.get("email_password")
-        EMAIL_RECEIVER = secrets.get("email_receiver")
+        
+        # Logic to handle single string OR list of emails
+        raw_receivers = secrets.get("email_receiver")
+        if isinstance(raw_receivers, str):
+            # Split by comma if user wrote "a@b.com, c@d.com"
+            EMAIL_RECEIVERS = [e.strip() for e in raw_receivers.split(',')]
+        elif isinstance(raw_receivers, list):
+            # User provided a JSON list ["a@b.com", "c@d.com"]
+            EMAIL_RECEIVERS = raw_receivers
+        else:
+            print(f"⚠️  WARNING: 'email_receiver' in {SECRETS_FILE} is missing or invalid.")
+
 except (FileNotFoundError, json.JSONDecodeError):
     print(f"⚠️ WARNING: {SECRETS_FILE} issue. Alerts disabled.")
-    EMAIL_SENDER = None
 
 # --- CONFIGURATION ---
 SATELLITE_HOSTNAME = "flamesat.local"
@@ -57,19 +70,26 @@ def recvall(sock, n):
     return data
 
 def send_email_thread(temp):
-    """Runs in background to send email"""
-    if not EMAIL_SENDER: return
+    """Runs in background to send email to MULTIPLE recipients"""
+    if not EMAIL_SENDER or not EMAIL_RECEIVERS: return
+    
     try:
+        # Create the comma-separated string for the header
+        receivers_str = ", ".join(EMAIL_RECEIVERS)
+        
         msg = MIMEText(f"EMERGENCY ALERT\n\nFLAMESAT has detected a thermal anomaly.\nMax Temperature: {temp:.1f}°C\n\nView Telemetry: https://flamedata.nillsite.com")
         msg['Subject'] = f"🔥 FLAMESAT ALERT: {temp:.1f}°C DETECTED"
         msg['From'] = EMAIL_SENDER
-        msg['To'] = EMAIL_RECEIVER
+        msg['To'] = receivers_str
 
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        
+        # send_message automatically handles the list of recipients in the header
         server.send_message(msg)
         server.quit()
-        print(f"[WATCHDOG] ✅ Alert Email Sent for {temp:.1f}°C.")
+        
+        print(f"[WATCHDOG] ✅ Alert Email Sent to {len(EMAIL_RECEIVERS)} recipients.")
     except Exception as e:
         print(f"[WATCHDOG] ❌ Email Failed: {e}")
 

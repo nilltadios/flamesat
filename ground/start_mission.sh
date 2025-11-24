@@ -1,50 +1,53 @@
 #!/bin/bash
 
-# Define paths
-USER="flamesat"
-WORKING_DIR="/home/$USER/flamesat/satellite"
-# Point directly to the Python inside the virtual environment
-PYTHON_EXEC="$WORKING_DIR/env/bin/python"
-SCRIPT_PATH="$WORKING_DIR/tx_satellite.py"
-SERVICE_FILE="/etc/systemd/system/flamesat.service"
+# 1. Identify where this script is living
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR" || exit
 
-echo "🛰️  Configuring FlameSat Auto-Boot System..."
+# 2. Configuration
+SAT_HOST="flamesat.local"
+SAT_PORT=5000
+LOG_DIR="logs"
 
-# 1. Verify paths exist
-if [ ! -f "$PYTHON_EXEC" ]; then
-    echo "❌ Error: Virtual environment not found at $PYTHON_EXEC"
-    echo "   Did you create the 'env' folder?"
-    exit 1
+mkdir -p "$LOG_DIR"
+
+echo "========================================"
+echo "   🔥 FLAMESAT MISSION CONTROL v1.2   "
+echo "========================================"
+
+# 3. UPLINK CHECK (The "Command" Phase)
+echo "📡 Attempting to acquire satellite signal..."
+
+# Use netcat (nc) to check if the satellite is listening on port 5000
+# -z = scan only, -w 2 = wait max 2 seconds
+if nc -z -w 2 "$SAT_HOST" "$SAT_PORT"; then
+    echo "   ✅ UPLINK ESTABLISHED: Satellite is Online and Listening."
+else
+    echo "   ⚠️  WARNING: Satellite Unreachable."
+    echo "      - Is the Pi powered on?"
+    echo "      - Is the 'flamesat' service running?"
+    echo "      - Attempting to launch anyway (Telemetry may be offline)..."
 fi
 
-# 2. Create Systemd Service File
-echo "📝 Generating Service File..."
-sudo bash -c "cat > $SERVICE_FILE" <<EOL
-[Unit]
-Description=FlameSat Telemetry Transmitter
-After=network-online.target
-Wants=network-online.target
+echo "🚀 Initializing Ground Systems..."
 
-[Service]
-User=$USER
-Group=$USER
-WorkingDirectory=$WORKING_DIR
-ExecStart=$PYTHON_EXEC $SCRIPT_PATH
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
+# 4. Start Cloudflare Tunnel
+nohup cloudflared tunnel --config flame_tunnel/config_flame.yml run > "$LOG_DIR/flame_tunnel.log" 2>&1 &
+TUNNEL_PID=$!
+echo "   🔹 Tunnel Active (PID: $TUNNEL_PID)"
 
-[Install]
-WantedBy=multi-user.target
-EOL
+# 5. Start Ground Server
+# We use the system python here (assuming dependencies are installed globally or use a venv if you have one on ground)
+nohup python3 ground_server.py > "$LOG_DIR/flame_server.log" 2>&1 &
+SERVER_PID=$!
+echo "   🔹 Server Active (PID: $SERVER_PID)"
 
-# 3. Enable and Start
-echo "⚡ Enabling Service..."
-sudo systemctl daemon-reload
-sudo systemctl enable flamesat.service
-sudo systemctl restart flamesat.service
+# 6. Save PIDs
+echo "$TUNNEL_PID" > "$LOG_DIR/mission.pids"
+echo "$SERVER_PID" >> "$LOG_DIR/mission.pids"
 
-echo "✅ SUCCESS! FlameSat is now fully autonomous."
-echo "   The transmitter will start automatically every time you power on the Pi."
-echo "   View logs anytime with: journalctl -u flamesat -f"
+echo "----------------------------------------"
+echo "✅ MISSION LIVE"
+echo "📊 Dashboard: https://flamedata.nillsite.com"
+echo "📝 Logs:      $SCRIPT_DIR/$LOG_DIR/"
+echo "----------------------------------------"
