@@ -1,64 +1,69 @@
 import socket
 import time
-import json
+import struct
 import board
 import busio
 import adafruit_mlx90640
 
 # --- CONFIGURATION ---
-SATELLITE_PORT = 5000  # The "Channel" we transmit on
+SATELLITE_PORT = 5000 
 
 # --- HARDWARE SETUP ---
-print("[SAT] Initializing Sensors...")
-i2c = busio.I2C(board.SCL, board.SDA, frequency=800000)
-mlx = adafruit_mlx90640.MLX90640(i2c)
-mlx.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_4_HZ
+print("[SAT] Initializing Sensors (RAW MODE)...")
+try:
+    i2c = busio.I2C(board.SCL, board.SDA, frequency=800000)
+    mlx = adafruit_mlx90640.MLX90640(i2c)
+    mlx.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_4_HZ
+except Exception as e:
+    print(f"[SAT] ❌ Sensor Hardware Error: {e}")
+    # Continue only for network testing if sensor fails
+    mlx = None
 
 # --- COMMS SETUP ---
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-# 0.0.0.0 means "Listen on all network interfaces" (Wi-Fi, Ethernet, etc)
+# Allow immediate reuse of the port after restart
+server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server_socket.bind(('0.0.0.0', SATELLITE_PORT))
 server_socket.listen(1)
 
-print(f"[SAT] Telemetry Downlink Active on Port {SATELLITE_PORT}")
-print("[SAT] Waiting for Ground Station connection...")
+print(f"[SAT] Raw Telemetry Downlink Active on Port {SATELLITE_PORT}")
 
-# Buffer
-frame = [0] * 768
+# Pre-allocate buffer for 768 float values
+frame = [0.0] * 768
 
 while True:
-    # Wait for Laptop to connect
+    print("[SAT] Waiting for Ground Station...")
     client_socket, addr = server_socket.accept()
-    print(f"[SAT] Connected to Ground Station: {addr}")
+    print(f"[SAT] Connected: {addr}")
 
     try:
         while True:
-            # 1. Get Data
-            mlx.getFrame(frame)
-            
-            # 2. Analyze High/Low for Telemetry
-            max_temp = max(frame)
-            status = "FIRE" if max_temp > 40 else "NOMINAL"
+            if mlx:
+                # 1. Get Raw Data directly into memory
+                try:
+                    mlx.getFrame(frame)
+                except RuntimeError:
+                    # Sensor glitch, retry
+                    continue
+            else:
+                # Mock data if sensor failed (for debugging)
+                frame = [20.0] * 768
 
-            # 3. Pack Data (JSON is easy to send)
-            # We send a packet: { 'temp': [768 floats], 'status': 'NOMINAL' }
-            packet = {
-                "data": ["{:.2f}".format(x) for x in frame], # Format to 2 decimals to save bandwidth
-                "status": status,
-                "max": f"{max_temp:.1f}"
-            }
+            # 2. Pack as Binary (Zero compute overhead)
+            # '768f' = 768 float (4-byte) numbers packed together
+            # This creates a 3072-byte binary blob
+            binary_data = struct.pack('768f', *frame)
+
+            # 3. Transmit Raw Bytes
+            client_socket.sendall(binary_data)
             
-            # 4. Transmit
-            # We add a newline \n so the laptop knows where one packet ends
-            data_string = json.dumps(packet) + "\n"
-            client_socket.sendall(data_string.encode('utf-8'))
-            
-            # Throttle slightly to prevent network flood
-            time.sleep(0.1)
+            # Throttle slightly to match 4Hz refresh rate
+            time.sleep(0.20)
 
     except (BrokenPipeError, ConnectionResetError):
-        print("[SAT] Signal Lost. Scanning for Ground Station...")
+        print("[SAT] Signal Lost. Resetting...")
         client_socket.close()
     except Exception as e:
         print(f"[SAT] Critical Error: {e}")
-        break
+        client_socket.close()
+        time.sleep(1)

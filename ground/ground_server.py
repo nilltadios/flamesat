@@ -4,21 +4,21 @@ import threading
 import time
 import logging
 import smtplib
+import struct
 import os
 from email.mime.text import MIMEText
 from flask import Flask, jsonify, render_template_string, request
 
 # --- LOAD SECRETS ---
-# Load credentials from the ignored JSON file
 SECRETS_FILE = "secrets.json"
 try:
     with open(SECRETS_FILE) as f:
         secrets = json.load(f)
-        EMAIL_SENDER = secrets["email_sender"]
-        EMAIL_PASSWORD = secrets["email_password"]
-        EMAIL_RECEIVER = secrets["email_receiver"]
-except FileNotFoundError:
-    print(f"❌ ERROR: {SECRETS_FILE} not found! Create it to enable alerts.")
+        EMAIL_SENDER = secrets.get("email_sender")
+        EMAIL_PASSWORD = secrets.get("email_password")
+        EMAIL_RECEIVER = secrets.get("email_receiver")
+except (FileNotFoundError, json.JSONDecodeError):
+    print(f"⚠️ WARNING: {SECRETS_FILE} issue. Alerts disabled.")
     EMAIL_SENDER = None
 
 # --- CONFIGURATION ---
@@ -28,19 +28,40 @@ SATELLITE_PORT = 5000
 WEB_PORT = 9876
 ALERT_COOLDOWN = 60 
 
+# Frame Size: 768 pixels * 4 bytes (float) = 3072 bytes
+FRAME_SIZE = 3072 
+
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 latest_telemetry = {"status": "SEARCHING...", "max": 0, "data": [0] * 768}
-last_alert_time = 0 # Timestamp of last email
+last_alert_time = 0 
 
 app = Flask(__name__)
 
+# --- HELPERS ---
+
+def recvall(sock, n):
+    """Ensure we receive exactly n bytes before proceeding."""
+    data = bytearray()
+    while len(data) < n:
+        try:
+            packet = sock.recv(n - len(data))
+            if not packet:
+                return None
+            data.extend(packet)
+        except socket.timeout:
+            return None
+        except OSError:
+            return None
+    return data
+
 def send_email_thread(temp):
     """Runs in background to send email"""
+    if not EMAIL_SENDER: return
     try:
-        msg = MIMEText(f"EMERGENCY ALERT\n\nFLAMESAT has detected a thermal anomaly.\nMax Temperature: {temp}°C\n\nView Telemetry: https://flamedata.nillsite.com")
-        msg['Subject'] = f"🔥 FLAMESAT ALERT: {temp}°C DETECTED"
+        msg = MIMEText(f"EMERGENCY ALERT\n\nFLAMESAT has detected a thermal anomaly.\nMax Temperature: {temp:.1f}°C\n\nView Telemetry: https://flamedata.nillsite.com")
+        msg['Subject'] = f"🔥 FLAMESAT ALERT: {temp:.1f}°C DETECTED"
         msg['From'] = EMAIL_SENDER
         msg['To'] = EMAIL_RECEIVER
 
@@ -48,60 +69,87 @@ def send_email_thread(temp):
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print(f"[WATCHDOG] ✅ Alert Email Sent for {temp}°C.")
+        print(f"[WATCHDOG] ✅ Alert Email Sent for {temp:.1f}°C.")
     except Exception as e:
         print(f"[WATCHDOG] ❌ Email Failed: {e}")
 
 def find_satellite():
-    try: return socket.gethostbyname(SATELLITE_HOSTNAME)
-    except: pass
+    """Scans for the satellite IP."""
+    try: 
+        return socket.gethostbyname(SATELLITE_HOSTNAME)
+    except: 
+        pass
+    
     for ip in KNOWN_IPS:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.2); s.connect((ip, SATELLITE_PORT)); s.close()
-            return ip
-        except: pass
+            s.settimeout(0.1)
+            result = s.connect_ex((ip, SATELLITE_PORT))
+            s.close()
+            if result == 0:
+                return ip
+        except: 
+            pass
     return None
 
 def telemetry_receiver():
+    """Main loop that connects to Sat and processes binary data."""
     global latest_telemetry, last_alert_time
     
     while True:
         target_ip = find_satellite()
         if not target_ip:
             latest_telemetry["status"] = "OFFLINE - SCANNING..."
-            time.sleep(3)
+            time.sleep(2)
             continue
 
         try:
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.settimeout(10)
+            client_socket.settimeout(5) # 5 second timeout if stream hangs
             client_socket.connect((target_ip, SATELLITE_PORT))
+            print(f"[GROUND] Connected to {target_ip}. Stream Active.")
             
-            socket_file = client_socket.makefile()
             while True:
-                line = socket_file.readline()
-                if not line: break
+                # 1. Receive Binary Frame
+                raw_bytes = recvall(client_socket, FRAME_SIZE)
+                if not raw_bytes: 
+                    print("[GROUND] Stream ended.")
+                    break
                 
-                data = json.loads(line)
-                latest_telemetry = data
+                # 2. Unpack Binary to Float List (Heavy Compute happens here)
+                try:
+                    frame_data = struct.unpack('768f', raw_bytes)
+                except struct.error:
+                    print("[GROUND] ⚠️ Packet Corrupt (Size Mismatch). Retrying...")
+                    continue
                 
-                # --- WATCHDOG LOGIC (FIXED) ---
-                if data['status'] == "FIRE" and EMAIL_SENDER:
-                    current_time = time.time()
-                    
-                    # Check cooldown
-                    if (current_time - last_alert_time) > ALERT_COOLDOWN:
-                        # 1. UPDATE TIMER IMMEDIATELY (Prevents Spam)
-                        last_alert_time = current_time
-                        print(f"\n[WATCHDOG] ⚠️ Fire Detected ({data['max']}°C). Dispatching Alert...")
-                        
-                        # 2. Start Thread
-                        threading.Thread(target=send_email_thread, args=(data['max'],)).start()
+                # 3. Analyze Data
+                max_temp = max(frame_data)
+                status = "FIRE" if max_temp > 40 else "NOMINAL"
 
-        except:
-            client_socket.close()
+                # 4. Update Global State for Web Server
+                latest_telemetry = {
+                    "data": ["{:.2f}".format(x) for x in frame_data],
+                    "status": status,
+                    "max": f"{max_temp:.1f}"
+                }
+                
+                # 5. Watchdog Alert System
+                if status == "FIRE" and EMAIL_SENDER:
+                    current_time = time.time()
+                    if (current_time - last_alert_time) > ALERT_COOLDOWN:
+                        last_alert_time = current_time
+                        print(f"\n[WATCHDOG] ⚠️ Fire Detected ({max_temp:.1f}°C). Alerting...")
+                        threading.Thread(target=send_email_thread, args=(max_temp,)).start()
+
+        except Exception as e:
+            print(f"[GROUND] Link Error: {e}")
+        finally:
+            try: client_socket.close()
+            except: pass
             time.sleep(1)
+
+# --- FLASK WEB SERVER ---
 
 @app.route('/api/telemetry')
 def get_telemetry():
