@@ -28,11 +28,14 @@ SATELLITE_PORT = 5000
 WEB_PORT = 9876
 ALERT_COOLDOWN = 60 
 
+# Size of one frame: 768 pixels * 4 bytes (float) = 3072 bytes
+FRAME_SIZE = 3072 
+
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 latest_telemetry = {"status": "SEARCHING...", "max": 0, "data": [0] * 768}
-last_alert_time = 0 # Timestamp of last email
+last_alert_time = 0 
 
 app = Flask(__name__)
 
@@ -63,6 +66,16 @@ def find_satellite():
         except: pass
     return None
 
+def recvall(sock, n):
+    """Helper function to receive exactly n bytes"""
+    data = bytearray()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data.extend(packet)
+    return data
+
 def telemetry_receiver():
     global latest_telemetry, last_alert_time
     
@@ -77,29 +90,39 @@ def telemetry_receiver():
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client_socket.settimeout(10)
             client_socket.connect((target_ip, SATELLITE_PORT))
+            print(f"[GROUND] Connected to {target_ip}. Receiving RAW data...")
             
-            socket_file = client_socket.makefile()
             while True:
-                line = socket_file.readline()
-                if not line: break
+                # 1. Receive Raw Bytes (Wait for full frame)
+                raw_bytes = recvall(client_socket, FRAME_SIZE)
+                if not raw_bytes: break
                 
-                data = json.loads(line)
-                latest_telemetry = data
+                # 2. Unpack Binary to Float List
+                # This CPU load is now on the laptop/server, not the Pi
+                frame_data = struct.unpack('768f', raw_bytes)
                 
-                # --- WATCHDOG LOGIC (FIXED) ---
-                if data['status'] == "FIRE" and EMAIL_SENDER:
-                    current_time = time.time()
-                    
-                    # Check cooldown
-                    if (current_time - last_alert_time) > ALERT_COOLDOWN:
-                        # 1. UPDATE TIMER IMMEDIATELY (Prevents Spam)
-                        last_alert_time = current_time
-                        print(f"\n[WATCHDOG] ⚠️ Fire Detected ({data['max']}°C). Dispatching Alert...")
-                        
-                        # 2. Start Thread
-                        threading.Thread(target=send_email_thread, args=(data['max'],)).start()
+                # 3. Perform Compute (Moved from Satellite)
+                max_temp = max(frame_data)
+                status = "FIRE" if max_temp > 40 else "NOMINAL"
 
-        except:
+                # 4. Format for Dashboard
+                # We recreate the dictionary structure the web page expects
+                latest_telemetry = {
+                    "data": ["{:.2f}".format(x) for x in frame_data],
+                    "status": status,
+                    "max": f"{max_temp:.1f}"
+                }
+                
+                # --- WATCHDOG LOGIC ---
+                if status == "FIRE" and EMAIL_SENDER:
+                    current_time = time.time()
+                    if (current_time - last_alert_time) > ALERT_COOLDOWN:
+                        last_alert_time = current_time
+                        print(f"\n[WATCHDOG] ⚠️ Fire Detected ({latest_telemetry['max']}°C). Alerting...")
+                        threading.Thread(target=send_email_thread, args=(latest_telemetry['max'],)).start()
+
+        except Exception as e:
+            print(f"[GROUND] Connection Error: {e}")
             client_socket.close()
             time.sleep(1)
 
