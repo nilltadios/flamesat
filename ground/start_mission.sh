@@ -1,28 +1,50 @@
 #!/bin/bash
 
-# 1. Identify where this script is living (makes it portable)
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$SCRIPT_DIR" || exit
+# Define paths
+USER="flamesat"
+WORKING_DIR="/home/$USER/flamesat/satellite"
+# Point directly to the Python inside the virtual environment
+PYTHON_EXEC="$WORKING_DIR/env/bin/python"
+SCRIPT_PATH="$WORKING_DIR/tx_satellite.py"
+SERVICE_FILE="/etc/systemd/system/flamesat.service"
 
-# 2. Create a local directory for logs and PIDs if it doesn't exist
-mkdir -p logs
+echo "🛰️  Configuring FlameSat Auto-Boot System..."
 
-echo "🚀 Initializing Ground Station..."
+# 1. Verify paths exist
+if [ ! -f "$PYTHON_EXEC" ]; then
+    echo "❌ Error: Virtual environment not found at $PYTHON_EXEC"
+    echo "   Did you create the 'env' folder?"
+    exit 1
+fi
 
-# 3. Start Cloudflare Tunnel (Silent)
-# Note: Config path is relative to SCRIPT_DIR
-nohup cloudflared tunnel --config flame_tunnel/config_flame.yml run > logs/flame_tunnel.log 2>&1 &
-TUNNEL_PID=$!
-echo "   ✅ Tunnel Active (PID: $TUNNEL_PID)"
+# 2. Create Systemd Service File
+echo "📝 Generating Service File..."
+sudo bash -c "cat > $SERVICE_FILE" <<EOL
+[Unit]
+Description=FlameSat Telemetry Transmitter
+After=network-online.target
+Wants=network-online.target
 
-# 4. Start Ground Server (Silent)
-nohup python3 ground_server.py > logs/flame_server.log 2>&1 &
-SERVER_PID=$!
-echo "   ✅ Server Active (PID: $SERVER_PID)"
+[Service]
+User=$USER
+Group=$USER
+WorkingDirectory=$WORKING_DIR
+ExecStart=$PYTHON_EXEC $SCRIPT_PATH
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
-# 5. Save PIDs to local file
-echo "$TUNNEL_PID" > logs/mission.pids
-echo "$SERVER_PID" >> logs/mission.pids
+[Install]
+WantedBy=multi-user.target
+EOL
 
-echo "📡 Mission Control is LIVE at https://flamedata.nillsite.com"
-echo "   (Logs available in $SCRIPT_DIR/logs/)"
+# 3. Enable and Start
+echo "⚡ Enabling Service..."
+sudo systemctl daemon-reload
+sudo systemctl enable flamesat.service
+sudo systemctl restart flamesat.service
+
+echo "✅ SUCCESS! FlameSat is now fully autonomous."
+echo "   The transmitter will start automatically every time you power on the Pi."
+echo "   View logs anytime with: journalctl -u flamesat -f"
