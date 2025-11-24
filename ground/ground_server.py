@@ -110,7 +110,7 @@ def telemetry_receiver():
             print(f"[GROUND] Connected to {target_ip}. Stream Active.")
             
             while True:
-                # 1. Receive Binary Frame
+                # 1. Receive Binary Frame using helper
                 raw_bytes = recvall(client_socket, FRAME_SIZE)
                 if not raw_bytes: 
                     print("[GROUND] Stream ended.")

@@ -16,7 +16,6 @@ try:
     mlx.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_4_HZ
 except Exception as e:
     print(f"[SAT] ❌ Sensor Hardware Error: {e}")
-    # Continue only for network testing if sensor fails
     mlx = None
 
 # --- COMMS SETUP ---
@@ -39,14 +38,14 @@ while True:
     try:
         while True:
             if mlx:
-                # 1. Get Raw Data directly into memory
                 try:
+                    # 1. Get Raw Data directly into memory
                     mlx.getFrame(frame)
                 except RuntimeError:
                     # Sensor glitch, retry
                     continue
             else:
-                # Mock data if sensor failed (for debugging)
+                # Mock data if sensor failed (for testing without sensor)
                 frame = [20.0] * 768
 
             # 2. Pack as Binary (Zero compute overhead)
